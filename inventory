@@ -1,0 +1,10 @@
+[hypervisorserver]
+hypervisor_hostname ansible_host=192.168.2.95
+
+[hypervisorserver:vars]
+ansible_user=localadmin
+#ansible_ssh_private_key_file=/path/to/your/ssh/key
+# Or if using password authentication:
+# ansible_password=<PASSWORD>
+ansible_become=yes
+ansible_become_method=sudo
