@@ -8,7 +8,7 @@
     image_url: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
     image_name: "noble-server-cloudimg-amd64.img"
     image_directory: "/var/lib/libvirt/images"
-    vm_name: "ceph-admin-vm"
+    vm_name: "ceph-vm-01"
     vm_memory: "3072"
     vm_vcpus: "1"
     vm_bridge: "virbr0"
@@ -56,17 +56,8 @@
     - name: Configure SSH and network in the image
       command: >
         virt-customize -a {{ image_directory }}/{{ image_name }}
-        --write '/etc/ssh/sshd_config.d/60-cloudimg-settings.conf:PasswordAuthentication yes
-ChallengeResponseAuthentication yes
-PermitRootLogin yes'
-        --write '/etc/netplan/99-dhcp.yaml:network:
-  version: 2
-  renderer: networkd
-  ethernets:
-    default:
-      match:
-        name: en*
-      dhcp4: true'
+        --write "/etc/ssh/sshd_config.d/60-cloudimg-settings.conf:PasswordAuthentication yes\nChallengeResponseAuthentication yes\nPermitRootLogin yes"
+        --write "/etc/netplan/99-dhcp.yaml:network:\n  version: 2\n  renderer: networkd\n  ethernets:\n    default:\n      match:\n        name: en*\n      dhcp4: true"
         --run-command 'netplan generate && netplan apply'
         --run-command 'systemctl stop apparmor && systemctl disable apparmor'
         --run-command 'dpkg-reconfigure openssh-server && systemctl restart ssh'
