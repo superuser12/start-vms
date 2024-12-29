@@ -12,15 +12,32 @@
     vm_memory: "3072"
     vm_vcpus: "1"
     vm_bridge: "virbr0"
-    root_password: "password"
-
-    # The variable specifying the size of the expanded image
     image_size: "25G"
-
-    # Use the size variable in naming the expanded image file
     expanded_image: "{{ vm_name }}-{{ image_size }}.qcow2"
+    netplan_config: |  # Proper indentation for netplan
+      network:
+        version: 2
+        renderer: networkd
+        ethernets:
+          default:
+            match:
+              # no quotes around en*
+              name: en*
+            dhcp4: true
+
 
   tasks:
+    - name: Check if VM already exists on this host
+      shell: "virsh list --all | grep -w '{{ vm_name }}'"
+      register: vm_exists
+      failed_when: false
+      changed_when: false
+
+    - name: Fail if VM is already present
+      fail:
+        msg: "VM {{ vm_name }} already exists on the host. Skipping deployment."
+      when: vm_exists.rc == 0
+
     - name: Ensure /var/lib/libvirt/images directory exists
       file:
         path: "{{ image_directory }}"
@@ -31,11 +48,12 @@
         path: "{{ image_directory }}/{{ image_name }}"
       register: base_image
 
-    - name: Install libguestfs-tools (virt-customize) package
-      apt:
-        name: libguestfs-tools
-        state: present
-        update_cache: yes
+# will make this task a manual process
+#    - name: Install libguestfs-tools (virt-customize) package
+#      apt:
+#        name: libguestfs-tools
+#        state: present
+#        update_cache: yes
 
     - name: Download the Ubuntu cloud image if not already present
       get_url:
@@ -53,16 +71,46 @@
         chdir: "{{ image_directory }}"
       when: not base_image.stat.exists
 
-    - name: Configure SSH and network in the image
+    - name: Create SSH configuration
+      template:
+        src: templates/60-cloudimg-settings.conf.j2
+        dest: /tmp/60-cloudimg-settings.conf
+        mode: '0644'
+      when: not base_image.stat.exists
+
+    - name: Copy SSH config into image
       command: >
         virt-customize -a {{ image_directory }}/{{ image_name }}
-        --write "/etc/ssh/sshd_config.d/60-cloudimg-settings.conf:PasswordAuthentication yes\nChallengeResponseAuthentication yes\nPermitRootLogin yes"
-        --write "/etc/netplan/99-dhcp.yaml:network:\n  version: 2\n  renderer: networkd\n  ethernets:\n    default:\n      match:\n        name: en*\n      dhcp4: true"
+        --copy-in /tmp/60-cloudimg-settings.conf:/etc/ssh/sshd_config.d/
+      args:
+        chdir: "{{ image_directory }}"
+      tags: ['imageconfig']
+      when: not base_image.stat.exists
+    - name: Create netplan configuration
+      template:
+        src: templates/99-dhcp.yaml.j2
+        dest: /tmp/99-dhcp.yaml
+        mode: '0644'
+      tags: ['imageconfig']
+      when: not base_image.stat.exists
+
+    - name: Copy netplan config into image
+      command: >
+        virt-customize -a {{ image_directory }}/{{ image_name }}
+        --copy-in /tmp/99-dhcp.yaml:/etc/netplan/
+      args:
+        chdir: "{{ image_directory }}"
+      tags: ['imageconfig']
+      when: not base_image.stat.exists
+    - name: Apply network and SSH configurations
+      command: >
+        virt-customize -a {{ image_directory }}/{{ image_name }}
         --run-command 'netplan generate && netplan apply'
         --run-command 'systemctl stop apparmor && systemctl disable apparmor'
         --run-command 'dpkg-reconfigure openssh-server && systemctl restart ssh'
       args:
         chdir: "{{ image_directory }}"
+      tags: ['imageconfig']
       when: not base_image.stat.exists
 
     - name: Expand the qcow image to the specified size
