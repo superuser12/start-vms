@@ -2,13 +2,15 @@
 - name: Deploy and configure Ubuntu cloud image on Hypervisor
   hosts: hypervisorserver
   become: yes
-  gather_facts: yes
+  gather_facts: no
 
   vars:
     image_url: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
     image_name: "noble-server-cloudimg-amd64.img"
     image_directory: "/var/lib/libvirt/images"
-    vm_name: "ceph-vm-01"
+    #pass these variables as part of the command line argument
+#    vm_name: "ceph-vm-01"
+    #root_password
     vm_memory: "3072"
     vm_vcpus: "1"
     vm_bridge: "virbr0"
