@@ -1,0 +1,168 @@
+---
+- name: Deploy and configure Ubuntu cloud image on Proxmox
+  hosts: hypervisor_hostname
+  become: no
+  gather_facts: no
+
+  vars:
+    image_url: "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+    image_name: "noble-server-cloudimg-amd64.img"
+    image_directory: "/var/lib/vz/template/iso"  # Proxmox template directory
+    # Pass these variables as part of the command line argument
+    # vm_id: "200"  # Proxmox uses numeric VM IDs
+    # vm_name: "ceph-vm-01"
+    # root_password
+    vm_memory: "3072"
+    vm_vcpus: "3"
+    vm_bridge: "vmbr0"  # Default Proxmox bridge
+    image_size: "25G"
+    vm_storage: "local-lvm"  # Proxmox storage target
+    expanded_image: "{{ vm_name }}-{{ image_size }}.qcow2"
+    netplan_config: |  # Proper indentation for netplan
+      network:
+        version: 2
+        renderer: networkd
+        ethernets:
+          default:
+            match:
+              name: en*
+            dhcp4: true
+
+  tasks:
+    - name: Check if VM ID already exists on Proxmox
+      shell: "qm list | grep -w '{{ vm_id }}'"
+      register: vm_exists
+      failed_when: false
+      changed_when: false
+
+    - name: Fail if VM ID is already in use
+      fail:
+        msg: "VM ID {{ vm_id }} already exists on Proxmox. Choose a different VM ID."
+      when: vm_exists.rc == 0
+
+    - name: Ensure Proxmox template directory exists
+      file:
+        path: "{{ image_directory }}"
+        state: directory
+
+    - name: Check if base image already exists
+      stat:
+        path: "{{ image_directory }}/{{ image_name }}"
+      register: base_image
+
+    - name: Download the Ubuntu cloud image if not already present
+      get_url:
+        url: "{{ image_url }}"
+        dest: "{{ image_directory }}/{{ image_name }}"
+        mode: '0644'
+      when: not base_image.stat.exists
+      register: downloaded_image
+
+    - name: Change the root password in the downloaded image
+      command: >
+        virt-customize -a {{ image_directory }}/{{ image_name }}
+        --root-password password:{{ root_password }}
+      args:
+        chdir: "{{ image_directory }}"
+      when: not base_image.stat.exists
+
+    - name: Create SSH configuration
+      template:
+        src: templates/60-cloudimg-settings.conf.j2
+        dest: /tmp/60-cloudimg-settings.conf
+        mode: '0644'
+      when: not base_image.stat.exists
+
+    - name: Copy SSH config into image
+      command: >
+        virt-customize -a {{ image_directory }}/{{ image_name }}
+        --copy-in /tmp/60-cloudimg-settings.conf:/etc/ssh/sshd_config.d/
+      args:
+        chdir: "{{ image_directory }}"
+      tags: ['imageconfig']
+      when: not base_image.stat.exists
+
+    - name: Create netplan configuration
+      template:
+        src: templates/99-dhcp.yaml.j2
+        dest: /tmp/99-dhcp.yaml
+        mode: '0644'
+      tags: ['imageconfig']
+      when: not base_image.stat.exists
+
+    - name: Copy netplan config into image
+      command: >
+        virt-customize -a {{ image_directory }}/{{ image_name }}
+        --copy-in /tmp/99-dhcp.yaml:/etc/netplan/
+      args:
+        chdir: "{{ image_directory }}"
+      tags: ['imageconfig']
+      when: not base_image.stat.exists
+
+    - name: Apply network and SSH configurations
+      command: >
+        virt-customize -a {{ image_directory }}/{{ image_name }}
+        --run-command 'netplan generate && netplan apply'
+        --run-command 'systemctl stop apparmor && systemctl disable apparmor'
+        --run-command 'dpkg-reconfigure openssh-server && systemctl restart ssh'
+      args:
+        chdir: "{{ image_directory }}"
+      tags: ['imageconfig']
+      when: not base_image.stat.exists
+
+    - name: Create expanded qcow2 image for the VM
+      command: >
+        qemu-img create -f qcow2 -F qcow2
+        -b {{ image_directory }}/{{ image_name }}
+        /tmp/{{ expanded_image }} {{ image_size }}
+      args:
+        chdir: "{{ image_directory }}"
+
+    - name: Create VM in Proxmox
+      command: >
+        qm create {{ vm_id }}
+        --name {{ vm_name }}
+        --memory {{ vm_memory }}
+        --cores {{ vm_vcpus }}
+        --net0 virtio,bridge={{ vm_bridge }}
+        --ostype l26
+        --agent 1
+        --boot order=scsi0
+        --scsihw virtio-scsi-pci
+        --serial0 socket
+        --vga serial0
+    - name: Import the disk to Proxmox storage
+      command: >
+        qm importdisk {{ vm_id }} /tmp/{{ expanded_image }} {{ vm_storage }}
+      register: import_result
+
+    - name: Attach the imported disk to the VM
+      command: >
+        qm set {{ vm_id }}
+        --scsi0 {{ vm_storage }}:vm-{{ vm_id }}-disk-0
+
+    - name: Set the disk as bootable
+      command: >
+        qm set {{ vm_id }} --bootdisk scsi0
+
+    - name: Add cloud-init drive (optional)
+      command: >
+        qm set {{ vm_id }}
+        --ide2 {{ vm_storage }}:cloudinit
+      ignore_errors: yes
+
+    - name: Start the VM
+      command: qm start {{ vm_id }}
+
+    - name: Clean up temporary expanded image
+      file:
+        path: "/tmp/{{ expanded_image }}"
+        state: absent
+
+    - name: Display VM information
+      command: qm config {{ vm_id }}
+      register: vm_config
+
+    - name: Show VM configuration
+      debug:
+        msg: "{{ vm_config.stdout_lines }}"
